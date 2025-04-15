@@ -8,46 +8,41 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
-	"github.com/deviceix/styx/internal/build"
+	"github.com/deviceix/styx/internal/builder"
 	"github.com/deviceix/styx/internal/compiler"
 	"github.com/deviceix/styx/internal/config"
+	"github.com/deviceix/styx/internal/logger"
 	"github.com/deviceix/styx/internal/platform"
 )
 
 var (
-	configPath    string
-	target        string
-	outputDir     string
-	verbose       bool
-	jobs          int
-	showCompilers bool
+	configPath string
+	target     string
+	outputDir  string
+	verbose    bool
+	jobs       int
+	log        *logger.Logger
 
 	version = "0.1.0"
 )
 
 // setupLogging configures the logger
 func setupLogging(verbose bool) {
-	output := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}
-
-	log.Logger = zerolog.New(output).With().Timestamp().Logger()
-	if verbose {
-		zerolog.SetGlobalLevel(zerolog.DebugLevel)
-	} else {
-		zerolog.SetGlobalLevel(zerolog.InfoLevel)
-	}
+	log = logger.New(verbose)
 }
 
 // main is the entry point of the application
 func main() {
+	// Initialize logger early to prevent nil pointer errors
+	log = logger.New(false)
+
 	rootCmd := &cobra.Command{
 		Use:   "styx",
 		Short: "Styx build system for C/C++ projects",
 		Long: `Styx is a modern, lightweight build system for C and C++ projects.
-It provides simple configuration, fast incremental builds, and 
+it provides simple configuration, fast incremental builds, and 
 supports specialized environments like OSDev and embedded systems.`,
 		Version: version,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
@@ -55,24 +50,24 @@ supports specialized environments like OSDev and embedded systems.`,
 		},
 	}
 
-	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "Path to configuration file (default: styx.toml in current directory)")
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
+	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "", "path to configuration file (default: styx.toml in current directory)")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
 	buildCmd := &cobra.Command{
 		Use:   "build",
-		Short: "Build the project",
-		Long:  `Build the project according to the configuration file.`,
+		Short: "build the project",
+		Long:  `build the project according to the configuration file.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			runBuild()
 		},
 	}
 
-	buildCmd.Flags().StringVarP(&target, "target", "t", "", "Build target (e.g., debug, release)")
-	buildCmd.Flags().StringVarP(&outputDir, "output-dir", "o", "", "Output directory")
-	buildCmd.Flags().IntVarP(&jobs, "jobs", "j", runtime.NumCPU(), "Number of parallel jobs")
+	buildCmd.Flags().StringVarP(&target, "target", "t", "", "build target (e.g., debug, release)")
+	buildCmd.Flags().StringVarP(&outputDir, "output-dir", "o", "", "output directory")
+	buildCmd.Flags().IntVarP(&jobs, "jobs", "j", runtime.NumCPU(), "number of parallel jobs")
 	cleanCmd := &cobra.Command{
 		Use:   "clean",
-		Short: "Clean build artifacts",
-		Long:  `Remove build artifacts and clear build cache.`,
+		Short: "clean build artifacts",
+		Long:  `remove build artifacts and clear build cache.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			runClean()
 		},
@@ -81,18 +76,18 @@ supports specialized environments like OSDev and embedded systems.`,
 	cleanCmd.Flags().StringVarP(&target, "target", "t", "", "Clean specific target (default: all)")
 	runCmd := &cobra.Command{
 		Use:   "run",
-		Short: "Build and run the project",
-		Long:  `Build and then execute the resulting binary.`,
+		Short: "build and run the project",
+		Long:  `build and then execute the resulting binary.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			runBuildAndExecute(args)
 		},
 	}
 
-	runCmd.Flags().StringVarP(&target, "target", "t", "", "Build target (e.g., debug, release)")
+	runCmd.Flags().StringVarP(&target, "target", "t", "", "build target (e.g., debug, release)")
 	initCmd := &cobra.Command{
 		Use:   "init",
-		Short: "Initialize a new project",
-		Long:  `Create a new Styx project in the current directory.`,
+		Short: "initialize a new project",
+		Long:  `create a new Styx project in the current directory.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			runInit()
 		},
@@ -100,8 +95,8 @@ supports specialized environments like OSDev and embedded systems.`,
 
 	compilerCmd := &cobra.Command{
 		Use:   "compiler",
-		Short: "Show compiler information",
-		Long:  `Display information about available compilers.`,
+		Short: "show compiler information",
+		Long:  `display information about available compilers.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			showCompilerInfo()
 		},
@@ -112,11 +107,9 @@ supports specialized environments like OSDev and embedded systems.`,
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(compilerCmd)
+	rootCmd.SilenceErrors = true
 	if err := rootCmd.Execute(); err != nil {
-		_, err := fmt.Fprintln(os.Stderr, err)
-		if err != nil {
-			return
-		}
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -125,16 +118,22 @@ supports specialized environments like OSDev and embedded systems.`,
 func loadConfig() (*config.Config, error) {
 	// use if provided
 	if configPath != "" {
+		log.Info("using configuration file: %s", configPath)
 		return config.ParseFile(configPath)
 	}
 
 	// otherwise try to find configuration file
+	log.Info("searching for configuration file...")
 	cfg, err := config.LoadConfig("")
 	if err != nil {
+		log.Info("no TOML configuration found, trying script configuration...")
 		cfg, err = config.LoadScriptConfig("")
 		if err != nil {
 			return nil, fmt.Errorf("no configuration file found")
 		}
+		log.Success("found script configuration")
+	} else {
+		log.Success("found TOML configuration")
 	}
 
 	return cfg, nil
@@ -142,69 +141,93 @@ func loadConfig() (*config.Config, error) {
 
 // runBuild executes the build process
 func runBuild() {
+	log.Info("loading project configuration...")
 	cfg, err := loadConfig()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to load configuration")
+		log.Error("failed to load configuration: %v", err)
+		os.Exit(1)
 	}
 
-	builder, err := build.NewBuilder(cfg)
+	log.Info("creating builder...")
+	b, err := builder.NewBuilder(cfg)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create builder")
+		log.Error("failed to create builder: %v", err)
+		os.Exit(1)
 	}
 
 	if target != "" {
-		if err := builder.SetTarget(target); err != nil {
-			log.Fatal().Err(err).Msg("Invalid target")
+		log.Info("setting target: %s", target)
+		if err := b.SetTarget(target); err != nil {
+			log.Error("invalid target: %v", err)
+			os.Exit(1)
 		}
 	}
 
 	if outputDir != "" {
-		if err := builder.SetOutputDir(outputDir); err != nil {
-			log.Fatal().Err(err).Msg("Invalid output directory")
+		log.Info("setting output directory: %s", outputDir)
+		if err := b.SetOutputDir(outputDir); err != nil {
+			log.Error("invalid output directory: %v", err)
+			os.Exit(1)
 		}
 	}
 
-	builder.SetVerbose(verbose)
-	if err := builder.Build(); err != nil {
-		log.Fatal().Err(err).Msg("Build failed")
+	b.SetVerbose(verbose)
+	start := time.Now()
+	if err := b.Build(); err != nil {
+		log.Error("build failed: %v", err)
+		os.Exit(1)
 	}
+
+	duration := time.Since(start)
+	log.Success("build completed in %.2f seconds", duration.Seconds())
 }
 
 // runClean cleans build artifacts
 func runClean() {
+	log.Info("loading project configuration...")
 	cfg, err := loadConfig()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to load configuration")
+		log.Error("failed to load configuration: %v", err)
+		os.Exit(1)
 	}
 
-	builder, err := build.NewBuilder(cfg)
+	log.Info("creating builder...")
+	b, err := builder.NewBuilder(cfg)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create builder")
+		log.Error("Failed to create builder: %v", err)
+		os.Exit(1)
 	}
 
 	if target != "" {
-		if err := builder.SetTarget(target); err != nil {
-			log.Fatal().Err(err).Msg("Invalid target")
+		log.Info("setting target: %s", target)
+		if err := b.SetTarget(target); err != nil {
+			log.Error("invalid target: %v", err)
+			os.Exit(1)
 		}
 	}
 
-	if err := builder.Clean(); err != nil {
-		log.Fatal().Err(err).Msg("Clean failed")
+	if err := b.Clean(); err != nil {
+		log.Error("clean failed: %v", err)
+		os.Exit(1)
 	}
 
-	log.Info().Msg("Clean completed successfully")
+	log.Success("clean completed successfully")
 }
 
 // runBuildAndExecute builds and then runs the executable
 func runBuildAndExecute(args []string) {
 	runBuild()
+
+	log.Info("loading project configuration...")
 	cfg, err := loadConfig()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to load configuration")
+		log.Error("failed to load configuration: %v", err)
+		os.Exit(1)
 	}
 
 	if cfg.Build.OutputType != "executable" {
-		log.Fatal().Msg("Cannot run non-executable output")
+		log.Error("cannot run non-executable output")
+		os.Exit(1)
 	}
 
 	targetDir := "build"
@@ -226,56 +249,63 @@ func runBuildAndExecute(args []string) {
 	platformInfo := platform.GetPlatformInfo()
 	exePath := filepath.Join(targetDir, outputName+platformInfo.ExeExtension)
 	if _, err := os.Stat(exePath); os.IsNotExist(err) {
-		log.Fatal().Str("path", exePath).Msg("Executable not found")
+		log.Error("executable not found: %s", exePath)
+		os.Exit(1)
 	}
-
-	log.Info().Str("executable", exePath).Msg("Running executable")
 
 	cmd := exec.Command(exePath, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
 	if err := cmd.Run(); err != nil {
-		log.Fatal().Err(err).Msg("Execution failed")
+		log.Error("execution failed: %v", err)
+		os.Exit(1)
 	}
 }
 
 // runInit initializes a new Styx project
 func runInit() {
 	if _, err := os.Stat("styx.toml"); err == nil {
-		log.Fatal().Msg("Project already initialized; styx.toml exists")
+		log.Error("project already initialized; styx.toml exists")
+		os.Exit(1)
 	}
 
+	log.Info("creating project directories...")
 	dirs := []string{"src", "include", "build"}
 	for _, dir := range dirs {
+		log.Info("creating directory: %s", dir)
 		if err := os.MkdirAll(dir, 0755); err != nil {
-			log.Fatal().Err(err).Str("dir", dir).Msg("Failed to create directory")
+			log.Error("failed to create directory %s: %v", dir, err)
+			os.Exit(1)
 		}
 	}
 
 	wd, err := os.Getwd()
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to get current directory")
+		log.Error("failed to get current directory: %v", err)
+		os.Exit(1)
 	}
 
 	projectName := filepath.Base(wd)
+	log.Info("project name: %s", projectName)
+
+	log.Info("creating configuration file...")
 	configContent := fmt.Sprintf(`[project]
 name = "%s"
 version = "0.1.0"
 language = "c++"
-standard = "c++17"
+standard = "c++23"
 
 [build]
 output_type = "executable"
 output_name = "%s"
-sources = ["src/*.cpp", "src/**/*.cpp"]
-include_dirs = ["include"]
+sources = [ "src/*.cpp", "src/**/*.cpp" ]
+include_dirs = [ "include" ]
 
 [toolchain]
 compiler = "auto"
-c_flags = ["-Wall", "-Wextra"]
-cxx_flags = ["-Wall", "-Wextra"]
+c_flags = [ "-Wall", "-Wextra" ]
+cxx_flags = [ "-Wall", "-Wextra" ]
 linker_flags = []
 
 [targets.debug]
@@ -288,9 +318,12 @@ cxx_flags = ["-O2", "-DNDEBUG"]
 `, projectName, projectName)
 
 	if err := os.WriteFile("styx.toml", []byte(configContent), 0644); err != nil {
-		log.Fatal().Err(err).Msg("Failed to write configuration file")
+		log.Error("failed to write configuration file: %v", err)
+		os.Exit(1)
 	}
+	log.Success("created styx.toml")
 
+	log.Info("creating main.cpp...")
 	mainContent := `#include <iostream>
 
 int main(int argc, char* argv[]) 
@@ -301,32 +334,34 @@ int main(int argc, char* argv[])
 `
 
 	if err := os.WriteFile("src/main.cpp", []byte(mainContent), 0644); err != nil {
-		log.Fatal().Err(err).Msg("Failed to write main.cpp")
+		log.Error("Failed to write main.cpp: %v", err)
+		os.Exit(1)
 	}
+	log.Success("created src/main.cpp")
 
-	log.Info().
-		Str("project", projectName).
-		Msg("Project initialized successfully")
+	log.Success("project %s initialized successfully", projectName)
+	log.Note("run 'styx build' to build the project")
+	log.Note("run 'styx run' to build and run the project")
 }
 
 // showCompilerInfo displays information about available compilers
 func showCompilerInfo() {
+	log.Info("detecting available compilers...")
+
 	compilers := compiler.DetectCompilers()
 
 	if len(compilers) == 0 {
-		log.Fatal().Msg("No compilers found")
+		log.Error("no compilers found")
+		os.Exit(1)
 	}
 
-	fmt.Println("Available compilers:")
-	fmt.Println()
-
+	log.Success("found %d compiler(s)", len(compilers))
 	for i, comp := range compilers {
-		fmt.Printf("%d. %s\n", i+1, comp.GetName())
-		fmt.Printf("   Version: %s\n", comp.GetVersion())
-		fmt.Printf("   Object extension: %s\n", comp.GetObjectExtension())
-		fmt.Printf("   Executable extension: %s\n", comp.GetExecutableExtension())
-		fmt.Printf("   Static library extension: %s\n", comp.GetStaticLibraryExtension())
-		fmt.Printf("   Shared library extension: %s\n", comp.GetSharedLibraryExtension())
-		fmt.Println()
+		log.Info("compiler #%d: %s", i+1, comp.GetName())
+		log.Note("  version: %s", comp.GetVersion())
+		log.Note("  object extension: %s", comp.GetObjectExtension())
+		log.Note("  executable extension: %s", comp.GetExecutableExtension())
+		log.Note("  static library extension: %s", comp.GetStaticLibraryExtension())
+		log.Note("  shared library extension: %s", comp.GetSharedLibraryExtension())
 	}
 }
